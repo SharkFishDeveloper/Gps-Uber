@@ -219,12 +219,12 @@ export default function RideMapMultiLeg() {
 
   // ---------- Guards ----------
   if (!position) {
-    return (
-      <div style={{ padding: 12, fontFamily: "system-ui" }}>
-        Allow location access to see the map…
-      </div>
-    );
-  }
+  return (
+    <div style={{ padding: 12, fontFamily: "system-ui" }}>
+      {error ? `Error: ${error}` : "Allow location access to see the map…"}
+    </div>
+  );
+}
 
   // ---------- Render ----------
   return (
