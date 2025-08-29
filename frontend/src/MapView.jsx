@@ -12,7 +12,7 @@ import {
 import "leaflet/dist/leaflet.css";
 import L from "leaflet";
 
-/* ---------- Leaflet marker icon fix for bundlers ---------- */
+/* ---------- Leaflet marker icon fix ---------- */
 delete L.Icon.Default.prototype._getIconUrl;
 L.Icon.Default.mergeOptions({
   iconRetinaUrl:
@@ -24,6 +24,29 @@ L.Icon.Default.mergeOptions({
 });
 
 /* ---------- Helpers ---------- */
+function roundGPS([lat, lon]) {
+  // ~1.1m precision
+  return [Number(lat.toFixed(5)), Number(lon.toFixed(5))];
+}
+
+function haversineKm([lat1, lon1], [lat2, lon2]) {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+function distanceMeters(a, b) {
+  return haversineKm(a, b) * 1000;
+}
+function isLatLng(v) {
+  return Array.isArray(v) && v.length === 2 && Number.isFinite(v[0]) && Number.isFinite(v[1]);
+}
+
 function RecenterOnce({ position }) {
   const map = useMap();
   const did = useRef(false);
@@ -57,9 +80,7 @@ function ViewportController({ bounds, follow, onUserPan }) {
   });
 
   useEffect(() => {
-    if (!bounds) return;
-    if (!follow) return;
-    if (userInteractingRef.current) return;
+    if (!bounds || !follow || userInteractingRef.current) return;
     map.fitBounds(bounds, { padding: [40, 40] });
   }, [bounds, follow, map]);
 
@@ -68,7 +89,6 @@ function ViewportController({ bounds, follow, onUserPan }) {
 
 function TapToSet({ onSet, mode }) {
   const movedRef = useRef(false);
-
   useMapEvents({
     dragstart() {
       movedRef.current = true;
@@ -80,44 +100,24 @@ function TapToSet({ onSet, mode }) {
       movedRef.current = false;
     },
     click(e) {
-      if (!mode) return;
-      if (movedRef.current) return; // ignore clicks caused by a drag/zoom
+      if (!mode || movedRef.current) return;
       onSet([e.latlng.lat, e.latlng.lng], mode);
     },
   });
   return null;
 }
 
-// Straight-line (Haversine) km
-function haversineKm([lat1, lon1], [lat2, lon2]) {
-  const R = 6371;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) ** 2;
-  return 2 * R * Math.asin(Math.sqrt(a));
-}
-
-function isLatLng(v) {
-  return Array.isArray(v) && v.length === 2 && Number.isFinite(v[0]) && Number.isFinite(v[1]);
-}
-
 /* ---------- Component ---------- */
 export default function RideMapMultiLeg() {
-  const [position, setPosition] = useState(null); // USER [lat, lon] from GPS
+  const [position, setPosition] = useState(null); // user [lat, lon]
   const [accuracy, setAccuracy] = useState(null);
 
-  const [driver, setDriver] = useState(null); // DRIVER (tap to set)
-  const [dest, setDest] = useState(null); // DEST (tap to set)
+  const [driver, setDriver] = useState(null);
+  const [dest, setDest] = useState(null);
 
-  // Route polylines
-  const [routeDU, setRouteDU] = useState([]); // Driver -> User
-  const [routeUD, setRouteUD] = useState([]); // User -> Destination
+  const [routeDU, setRouteDU] = useState([]); // driver → user
+  const [routeUD, setRouteUD] = useState([]); // user → dest
 
-  // Distances/ETAs
   const [kmDU, setKmDU] = useState(null);
   const [minDU, setMinDU] = useState(null);
   const [kmUD, setKmUD] = useState(null);
@@ -129,7 +129,6 @@ export default function RideMapMultiLeg() {
     const sum = a + b;
     return sum > 0 ? sum.toFixed(2) : null;
   }, [kmDU, kmUD]);
-
   const totalMin = useMemo(() => {
     const a = minDU || 0;
     const b = minUD || 0;
@@ -141,12 +140,19 @@ export default function RideMapMultiLeg() {
   const [loadingUD, setLoadingUD] = useState(false);
   const [error, setError] = useState("");
 
-  // Which point are we setting with a tap?
   const [tapMode, setTapMode] = useState(null); // "driver" | "dest" | null
-
-  // Follow viewport?
   const [follow, setFollow] = useState(true);
   const mapRef = useRef(null);
+
+  /* --- anti-blink knobs --- */
+  const MIN_MOVE_M = 30; // ignore smaller moves
+  const MIN_FETCH_INTERVAL_MS = 5000; // rate-limit fetch per leg
+
+  // track last routed endpoints & time (per leg)
+  const lastDU = useRef({ from: null, to: null, ts: 0 });
+  const lastUD = useRef({ from: null, to: null, ts: 0 });
+  const abortDU = useRef(null);
+  const abortUD = useRef(null);
 
   /* ---------- Live GPS ---------- */
   useEffect(() => {
@@ -157,57 +163,76 @@ export default function RideMapMultiLeg() {
     const id = navigator.geolocation.watchPosition(
       (pos) => {
         setError("");
-        setPosition([pos.coords.latitude, pos.coords.longitude]);
+        // round to de-noise
+        setPosition(roundGPS([pos.coords.latitude, pos.coords.longitude]));
         setAccuracy(pos.coords.accuracy);
       },
       (err) => setError(err.message || "Unable to get location"),
-      { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 }
+      { enableHighAccuracy: true, maximumAge: 2000, timeout: 10000 }
     );
     return () => navigator.geolocation.clearWatch(id);
   }, []);
 
-  /* ---------- Straight-line fallbacks so UI never blank ---------- */
+  /* ---------- Straight-line fallbacks (don’t clear polylines) ---------- */
   useEffect(() => {
-    // Driver -> User fallback
     if (isLatLng(driver) && isLatLng(position)) {
       const dKm = haversineKm(driver, position);
       setKmDU(dKm.toFixed(2));
-      const eta = Math.max(1, Math.round((dKm / 25) * 60)); // 25 km/h city
-      setMinDU(eta);
-      setRouteDU([]);
+      setMinDU(Math.max(1, Math.round((dKm / 25) * 60)));
     } else {
       setKmDU(null);
       setMinDU(null);
-      setRouteDU([]);
     }
   }, [driver, position]);
 
   useEffect(() => {
-    // User -> Destination fallback
     if (isLatLng(position) && isLatLng(dest)) {
       const dKm = haversineKm(position, dest);
       setKmUD(dKm.toFixed(2));
-      const eta = Math.max(1, Math.round((dKm / 25) * 60));
-      setMinUD(eta);
-      setRouteUD([]);
+      setMinUD(Math.max(1, Math.round((dKm / 25) * 60)));
     } else {
       setKmUD(null);
       setMinUD(null);
-      setRouteUD([]);
     }
   }, [position, dest]);
 
-  /* ---------- Fetch routes from OSRM (two legs) ---------- */
+  /* ---------- Fetch routes from OSRM (debounced, jitter-guarded, abortable) ---------- */
   useEffect(() => {
-    const fetchLeg = async (from, to, setCoords, setKm, setMin, setLoading) => {
+    const fetchLeg = async (leg, from, to) => {
       if (!isLatLng(from) || !isLatLng(to)) return;
-      setLoading(true);
+
+      // rate limit & distance gate
+      const now = Date.now();
+      const rec = leg === "DU" ? lastDU.current : lastUD.current;
+      const distChange =
+        isLatLng(rec.from) && isLatLng(rec.to)
+          ? Math.max(distanceMeters(rec.from, from), distanceMeters(rec.to, to))
+          : Infinity;
+
+      if (now - rec.ts < MIN_FETCH_INTERVAL_MS && distChange < MIN_MOVE_M) {
+        return; // ignore tiny/rapid changes
+      }
+
+      // cancel previous
+      try {
+        (leg === "DU" ? abortDU : abortUD).current?.abort();
+      } catch {}
+      const controller = new AbortController();
+      if (leg === "DU") abortDU.current = controller;
+      else abortUD.current = controller;
+
+      // mark last params
+      rec.from = from;
+      rec.to = to;
+      rec.ts = now;
+
+      leg === "DU" ? setLoadingDU(true) : setLoadingUD(true);
       try {
         const coords = `${from[1]},${from[0]};${to[1]},${to[0]}`;
         const url =
           `https://router.project-osrm.org/route/v1/driving/${coords}` +
           `?overview=full&geometries=geojson&alternatives=false&steps=false&continue_straight=true`;
-        const res = await fetch(url);
+        const res = await fetch(url, { signal: controller.signal });
         if (!res.ok) {
           let msg = "";
           try {
@@ -221,27 +246,43 @@ export default function RideMapMultiLeg() {
         const data = await res.json();
         const r = data.routes?.[0];
         if (!r) throw new Error("No route found");
+
         const path = r.geometry.coordinates.map(([lon, lat]) => [lat, lon]);
-        setCoords(path);
-        setKm((r.distance / 1000).toFixed(2));
-        setMin(Math.max(1, Math.round(r.duration / 60)));
+
+        // only set if this is still the latest request (not aborted/overwritten)
+        const stillLatest = (leg === "DU"
+          ? abortDU.current === controller
+          : abortUD.current === controller);
+        if (!stillLatest) return;
+
+        if (leg === "DU") {
+          setRouteDU(path);
+          setKmDU((r.distance / 1000).toFixed(2));
+          setMinDU(Math.max(1, Math.round(r.duration / 60)));
+        } else {
+          setRouteUD(path);
+          setKmUD((r.distance / 1000).toFixed(2));
+          setMinUD(Math.max(1, Math.round(r.duration / 60)));
+        }
       } catch (e) {
+        if (e?.name === "AbortError") return; // expected
         setError((e?.message || "Route fetch failed") + " — showing straight-line estimate.");
-        // keep existing fallback numbers & empty polyline
+        // keep existing polyline to avoid blink
       } finally {
-        setLoading(false);
+        leg === "DU" ? setLoadingDU(false) : setLoadingUD(false);
       }
     };
 
-    const t1 = setTimeout(() => fetchLeg(driver, position, setRouteDU, setKmDU, setMinDU, setLoadingDU), 300);
-    const t2 = setTimeout(() => fetchLeg(position, dest, setRouteUD, setKmUD, setMinUD, setLoadingUD), 300);
+    // Debounce tiny GPS jitters a bit further
+    const t1 = setTimeout(() => fetchLeg("DU", driver, position), 350);
+    const t2 = setTimeout(() => fetchLeg("UD", position, dest), 350);
     return () => {
       clearTimeout(t1);
       clearTimeout(t2);
     };
   }, [driver, position, dest]);
 
-  /* ---------- Map bounds ---------- */
+  /* ---------- Bounds ---------- */
   const bounds = useMemo(() => {
     const pts = [];
     if (routeDU.length) pts.push(...routeDU);
@@ -299,7 +340,7 @@ export default function RideMapMultiLeg() {
           }}
         />
 
-        {/* User (you) */}
+        {/* User */}
         <Marker position={position}>
           <Popup>
             User (You)
@@ -323,7 +364,7 @@ export default function RideMapMultiLeg() {
           </Marker>
         )}
 
-        {/* Routes */}
+        {/* Routes (kept during fetch to avoid blinking) */}
         {routeDU.length > 0 && (
           <Polyline positions={routeDU} weight={6} color="#1e90ff" />
         )}
@@ -332,7 +373,7 @@ export default function RideMapMultiLeg() {
         )}
       </MapContainer>
 
-      {/* Follow / Recenter button shows only when follow is off */}
+      {/* Follow / Recenter */}
       {!follow && (
         <button
           onClick={() => {
@@ -395,7 +436,7 @@ export default function RideMapMultiLeg() {
         </button>
       </div>
 
-      {/* Bottom info bar */}
+      {/* Bottom info */}
       <div
         style={{
           position: "fixed",
@@ -439,14 +480,19 @@ export default function RideMapMultiLeg() {
           onClick={() => {
             setDriver(null);
             setDest(null);
-            setRouteDU([]);
-            setRouteUD([]);
             setKmDU(null);
             setKmUD(null);
             setMinDU(null);
             setMinUD(null);
             setError("");
             setFollow(true);
+            // keep routes as-is, they will refresh when points are set again
+            setRouteDU([]);
+            setRouteUD([]);
+            lastDU.current = { from: null, to: null, ts: 0 };
+            lastUD.current = { from: null, to: null, ts: 0 };
+            abortDU.current?.abort?.();
+            abortUD.current?.abort?.();
           }}
           style={{
             gridColumn: "1 / -1",
@@ -463,7 +509,7 @@ export default function RideMapMultiLeg() {
         </button>
       </div>
 
-      {/* Status pill */}
+      {/* Status */}
       <div
         style={{
           position: "fixed",
@@ -482,7 +528,8 @@ export default function RideMapMultiLeg() {
         }}
       >
         <div>
-          <b>Status:</b> {loadingDU || loadingUD ? "Fetching routes…" : "Idle"}
+          <b>Status:</b>{" "}
+          {loadingDU || loadingUD ? "Fetching routes…" : "Idle"}
         </div>
         {error && <div style={{ color: "#c00" }}>{error}</div>}
       </div>
