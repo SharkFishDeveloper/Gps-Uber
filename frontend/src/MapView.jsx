@@ -43,13 +43,37 @@ const destIcon = makeIcon("#10b981", "▶");
 
 /* ---------- Map Styles ---------- */
 const MAP_STYLES = {
-  light: { name: "Light", url: "https://tiles.stadiamaps.com/tiles/alidade_smooth/{z}/{x}/{y}{r}.png", attribution: "© Stadia Maps © OpenMapTiles © OpenStreetMap contributors" },
-  dark: { name: "Dark", url: "https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png", attribution: "© Stadia Maps © OpenMapTiles © OpenStreetMap contributors" },
-  normal: { name: "Street", url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", attribution: "© OpenStreetMap contributors" },
-  satellite: { name: "Satellite", url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", attribution: "Tiles © Esri" },
-  topo: { name: "Terrain", url: "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png", attribution: "© OpenTopoMap contributors" },
-};
+  light: {
+    name: "Light",
+    url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+    attribution: "© OpenStreetMap contributors",
+  },
 
+  dark: {
+    name: "Dark",
+    url: "https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png?api_key=YOUR_KEY",
+    attribution:
+      "© Stadia Maps © OpenMapTiles © OpenStreetMap contributors",
+  },
+
+  normal: {
+    name: "Street",
+    url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+    attribution: "© OpenStreetMap contributors",
+  },
+
+  satellite: {
+    name: "Satellite",
+    url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    attribution: "Tiles © Esri",
+  },
+
+  topo: {
+    name: "Terrain",
+    url: "https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+    attribution: "© OpenTopoMap contributors",
+  },
+};
 /* ---------- Helpers ---------- */
 function roundGPS([lat, lon]) {
   return [Number(lat.toFixed(5)), Number(lon.toFixed(5))];
